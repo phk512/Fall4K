@@ -7,8 +7,8 @@ IDI_ICON1 ICON "app.ico"
 #include <windows.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,13                 // 文件版本 (必须用逗号隔开)
- PRODUCTVERSION 0,13              // 产品版本 (必须用逗号隔开)
+ FILEVERSION 0,16                 // 文件版本 (必须用逗号隔开)
+ PRODUCTVERSION 0,16              // 产品版本 (必须用逗号隔开)
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -22,12 +22,12 @@ BEGIN
 			
             VALUE "CompanyName",      "PHK512"
             VALUE "FileDescription",  "C++"
-            VALUE "FileVersion",      "0.13"
+            VALUE "FileVersion",      "0.16"
             VALUE "InternalName",     "Fall4K.exe"
             VALUE "LegalCopyright",   "PHK512"
             VALUE "OriginalFilename", "Fall4K.exe"
             VALUE "ProductName",      "Fall4K"
-            VALUE "ProductVersion",   "0.13"
+            VALUE "ProductVersion",   "0.16"
         END
     END
     BLOCK "VarFileInfo"

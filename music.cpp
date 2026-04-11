@@ -15,9 +15,14 @@
 const int SCREEN_WIDTH = 80;
 const int SCREEN_HEIGHT = 40;
 const int LANE_WIDTH = 6;
-const int LANE_START_X = (SCREEN_WIDTH - (LANE_WIDTH * 4 + 5)) / 2;
-const int JUDGE_LINE_Y = SCREEN_HEIGHT - 6;
+// 【修改】将常量改为基础常量，便于异象计算动态偏移
+const int BASE_LANE_START_X = (SCREEN_WIDTH - (LANE_WIDTH * 4 + 5)) / 2;
+const int BASE_JUDGE_LINE_Y = SCREEN_HEIGHT - 6;
 const int KEYS[4] = { 'D', 'F', 'J', 'K' };
+
+// 全局动态坐标
+int currentLaneStartX = BASE_LANE_START_X;
+int currentJudgeLineY = BASE_JUDGE_LINE_Y;
 
 // ================= 数据结构 =================
 enum NoteType { TAP, HOLD };
@@ -31,9 +36,13 @@ struct Note {
 	bool isBeingHeld = false;
 };
 
+// 【修改】全面升级异象结构体，支持多种类型
+enum AnomalyType { BOOM, X_SHIFT, Y_SHIFT, RAIN, FLASH };
 struct Anomaly {
+	AnomalyType type;
 	long long startTime;
 	long long endTime;
+	float val; // 用于 x 和 y 的偏移量
 };
 
 struct Toast {
@@ -59,6 +68,8 @@ struct GameSettings {
 	int audioOffset = 0;      // 延迟补偿，范围 -300 ~ 300 ms
 	bool beginnerMode = false;// 新手模式
 	bool enableTapSound = true; // 打击音效开关，默认开启
+	bool showRealTimeAcc = true; // 实时ACC开关
+	bool autoPlay = false;       // 全自动模式开关
 };
 
 GameSettings settings; // 全局设置对象
@@ -172,6 +183,8 @@ void loadSettings() {
 		else if (key == "offset") file >> settings.audioOffset;
 		else if (key == "beginner") file >> settings.beginnerMode;
 		else if (key == "tapsound") file >> settings.enableTapSound;
+		else if (key == "realtimeacc") file >> settings.showRealTimeAcc;
+		else if (key == "autoplay") file >> settings.autoPlay;
 	}
 	file.close();
 }
@@ -184,6 +197,8 @@ void saveSettings() {
 	file << "offset " << settings.audioOffset << "\n";
 	file << "beginner " << settings.beginnerMode << "\n";
 	file << "tapsound " << settings.enableTapSound << "\n";
+	file << "realtimeacc " << settings.showRealTimeAcc << "\n";
+	file << "autoplay " << settings.autoPlay << "\n";
 	file.close();
 }
 
@@ -191,8 +206,9 @@ void spawnParticles(int lane, WORD color, int count, float spread = 1.0f) {
 	if (!settings.enableKeyEffects) return; 
 	for (int p = 0; p < count; ++p) {
 		Particle part;
-		part.x = LANE_START_X + lane * LANE_WIDTH + 3;
-		part.y = JUDGE_LINE_Y;
+		// 动态获取当前的横纵坐标
+		part.x = currentLaneStartX + lane * LANE_WIDTH + 3;
+		part.y = currentJudgeLineY;
 		part.vx = ((rand() % 100) / 50.0f - 1.0f) * 1.5f * spread;
 		part.vy = -((rand() % 100) / 50.0f) * 1.2f - 0.5f;
 		part.life = part.maxLife = 10 + rand() % 15;
@@ -224,9 +240,25 @@ void loadChart(const std::string& filename) {
 		if (line.empty()) continue;
 		std::stringstream ss(line);
 		std::string timeStr, typeStr; ss >> timeStr >> typeStr;
-		if (typeStr == "boom") {
-			Anomaly a; a.startTime = parseTime(timeStr);
-			std::string endTimeStr; ss >> endTimeStr; a.endTime = parseTime(endTimeStr);
+		
+		// 【修改】解析新增的异象
+		if (typeStr == "boom" || typeStr == "rain" || typeStr == "flash") {
+			Anomaly a; 
+			if (typeStr == "boom") a.type = BOOM;
+			else if (typeStr == "rain") a.type = RAIN;
+			else if (typeStr == "flash") a.type = FLASH;
+			
+			a.startTime = parseTime(timeStr);
+			std::string endTimeStr; ss >> endTimeStr; 
+			a.endTime = parseTime(endTimeStr);
+			anomalies.push_back(a);
+		} else if (typeStr == "x" || typeStr == "y") {
+			Anomaly a;
+			a.type = (typeStr == "x") ? X_SHIFT : Y_SHIFT;
+			a.startTime = parseTime(timeStr);
+			long long duration;
+			ss >> a.val >> duration;
+			a.endTime = a.startTime + duration;
 			anomalies.push_back(a);
 		} else if (typeStr == "text") {
 			Toast t; t.startTime = parseTime(timeStr);
@@ -289,7 +321,6 @@ void playBootAnimation() {
 		if (t > 2600 || (GetAsyncKeyState(VK_RETURN) & 0x8000)) break; 
 		
 		clearBuffer(finalLayer);
-		// 随机内存寻址倾泻效果 (Matrix 数据雨)
 		for(int y = 0; y < SCREEN_HEIGHT; ++y) {
 			if (rand() % 100 < (3000 - t) / 30) { 
 				for(int x = 0; x < SCREEN_WIDTH; ++x) {
@@ -314,7 +345,8 @@ void playBootAnimation() {
 	}
 }
 
-void renderGame(long long curTime, bool isBoom, float boomIntensity) {
+// 【修改】添加各种新特效参数支持
+void renderGame(long long curTime, bool isBoom, float boomIntensity, bool isRain, bool isFlash) {
 	clearBuffer(playfieldLayer);
 	clearBuffer(finalLayer);
 	
@@ -325,54 +357,59 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity) {
 	
 	if (settings.enableStarfield) {
 		for (int y = 0; y < SCREEN_HEIGHT; ++y) {
-			for (int x = LANE_START_X; x < LANE_START_X + LANE_WIDTH * 4; ++x) {
+			for (int x = currentLaneStartX; x < currentLaneStartX + LANE_WIDTH * 4; ++x) {
 				if ((x * 17 + (y - curTime / 50) * 31) % 150 == 0) {
-					playfieldLayer[y][x].Char.AsciiChar = '.';
-					playfieldLayer[y][x].Attributes = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+					if (x >= 0 && x < SCREEN_WIDTH) {
+						playfieldLayer[y][x].Char.AsciiChar = '.';
+						playfieldLayer[y][x].Attributes = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+					}
 				}
 			}
 		}
 	}
 	
-	// 绘制轨道底图
-	for (int y = settings.hiddenLevel; y < SCREEN_HEIGHT; ++y) {
+	// 绘制轨道底图 (严格进行防越界检测)
+	for (int y = settings.hiddenLevel; y <= currentJudgeLineY; ++y) {
 		for (int l = 0; l <= 4; ++l) {
-			int x = LANE_START_X + l * LANE_WIDTH;
-			if (y >= 2 && y <= JUDGE_LINE_Y) {
+			int x = currentLaneStartX + l * LANE_WIDTH;
+			if (y >= 2 && x >= 0 && x < SCREEN_WIDTH && y < SCREEN_HEIGHT) {
 				playfieldLayer[y][x].Char.AsciiChar = '|';
 				playfieldLayer[y][x].Attributes = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
 			}
 		}
 		for (int l = 0; l < 4; ++l) {
-			if (prevKeyState[l] && y <= JUDGE_LINE_Y) {
+			if (prevKeyState[l] && y <= currentJudgeLineY) {
 				for (int dx = 1; dx < LANE_WIDTH; ++dx) {
-					playfieldLayer[y][LANE_START_X + l * LANE_WIDTH + dx].Attributes |= BACKGROUND_INTENSITY;
+					int x = currentLaneStartX + l * LANE_WIDTH + dx;
+					if (y >= 2 && x >= 0 && x < SCREEN_WIDTH && y < SCREEN_HEIGHT) {
+						playfieldLayer[y][x].Attributes |= BACKGROUND_INTENSITY;
+					}
 				}
 			}
 		}
 	}
 	
 	for (int l = 0; l < 4; ++l) {
-		int x = LANE_START_X + l * LANE_WIDTH + 1;
+		int x = currentLaneStartX + l * LANE_WIDTH + 1;
 		if (curTime > laneEffectEndTime[l]) laneColors[l] = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_INTENSITY;
-		drawString(playfieldLayer, x, JUDGE_LINE_Y, "=====", laneColors[l]);
+		drawString(playfieldLayer, x, currentJudgeLineY, "=====", laneColors[l]);
 	}
 	
 	for (auto& note : notes) {
 		if (note.processed && !note.isBeingHeld) continue;
 		
-		int y = JUDGE_LINE_Y - static_cast<int>((note.hitTime - curTime) * chartSpeed);
+		int y = currentJudgeLineY - static_cast<int>((note.hitTime - curTime) * chartSpeed);
 		int endY = y;
 		if (note.type == HOLD) {
-			endY = JUDGE_LINE_Y - static_cast<int>((note.hitTime + note.duration - curTime) * chartSpeed);
+			endY = currentJudgeLineY - static_cast<int>((note.hitTime + note.duration - curTime) * chartSpeed);
 		}
 		
 		if (endY < SCREEN_HEIGHT && y >= 0) {
-			int x = LANE_START_X + note.lane * LANE_WIDTH + 1;
+			int x = currentLaneStartX + note.lane * LANE_WIDTH + 1;
 			WORD colorTap = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 			WORD colorHold = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 			
-			if (note.type == TAP && y >= settings.hiddenLevel && y < JUDGE_LINE_Y + 5) {
+			if (note.type == TAP && y >= settings.hiddenLevel && y < currentJudgeLineY + 5) {
 				drawString(playfieldLayer, x, y, "[###]", colorTap);
 			}
 			else if (note.type == HOLD) {
@@ -399,20 +436,31 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity) {
 	}
 	
 	// 更新粒子
-	for (auto it = particles.begin(); it != particles.end(); ) {
-		it->x += it->vx; it->y += it->vy; it->vy += 0.15f; it->life--;
-		if (it->life <= 0) it = particles.erase(it);
-		else {
-			int px = (int)it->x; int py = (int)it->y;
+	// 【优化】更新粒子位置与生命
+	for (auto& p : particles) {
+		p.x += p.vx; 
+		p.y += p.vy; 
+		p.vy += 0.15f; 
+		p.life--;
+	}
+	
+	// 【优化】绘制未死亡的粒子
+	for (const auto& p : particles) {
+		if (p.life > 0) {
+			int px = (int)p.x; 
+			int py = (int)p.y;
 			if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
-				playfieldLayer[py][px].Char.AsciiChar = it->symbol;
-				playfieldLayer[py][px].Attributes = it->color;
+				playfieldLayer[py][px].Char.AsciiChar = p.symbol;
+				playfieldLayer[py][px].Attributes = p.color;
 			}
-			++it;
 		}
 	}
 	
-	// 处理特效与合成层
+	// 【优化】单次遍历高效清理已死亡粒子（从 O(N^2) 降为 O(N)）
+	particles.erase(std::remove_if(particles.begin(), particles.end(), 
+								   [](const Particle& p) { return p.life <= 0; }), particles.end());
+	
+	// 处理特效与合成层 (包含Boom特效)
 	for (int y = 0; y < SCREEN_HEIGHT; ++y) {
 		int xOffset = 0; bool glitch = false;
 		if (isBoom) {
@@ -426,6 +474,18 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity) {
 				finalLayer[y][x] = playfieldLayer[y][srcX];
 				if (glitch) { finalLayer[y][x].Char.AsciiChar = "!#$-%^&*"[rand() % 8]; finalLayer[y][x].Attributes = rand() % 16; }
 			} else finalLayer[y][x].Char.AsciiChar = ' ';
+		}
+	}
+	
+	// 【新增特效：Matrix代码雨】盖在轨道上面
+	if (isRain) {
+		for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+			for (int x = 0; x < SCREEN_WIDTH; ++x) {
+				if (rand() % 40 == 0) {
+					finalLayer[y][x].Char.AsciiChar = rand() % 94 + 33;
+					finalLayer[y][x].Attributes = FOREGROUND_GREEN | (rand() % 2 ? FOREGROUND_INTENSITY : 0);
+				}
+			}
 		}
 	}
 	
@@ -450,6 +510,15 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity) {
 	drawString(finalLayer, 2, comboY, "COMBO: " + std::to_string(combo), FOREGROUND_GREEN | FOREGROUND_INTENSITY);
 	drawString(finalLayer, 2, comboY + 1, "MAX  : " + std::to_string(maxCombo), FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
 	
+	// 【新增】实时ACC渲染
+	if (settings.showRealTimeAcc) {
+		float currentAcc = 0.0f;
+		int total = statPerfect + statGreat + statBad + statMiss;
+		if (total > 0) currentAcc = ((statPerfect * 100.0f) + (statGreat * 80.0f) + (statBad * 30.0f)) / total;
+		char accBuf[32]; sprintf_s(accBuf, "ACC: %05.2f%%", currentAcc);
+		drawString(finalLayer, 2, comboY + 3, accBuf, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+	}
+	
 	if (judgeDisplayTimer > 0) {
 		WORD judgeColor = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED; std::string judgePad = "";
 		if (lastJudge == "PERFECT") { judgeColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; judgePad = " PERFECT "; }
@@ -458,8 +527,21 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity) {
 		if (lastJudge == "MISS") { judgeColor = FOREGROUND_RED | FOREGROUND_INTENSITY; judgePad = " MISS! "; } 
 		
 		int yOff = (judgeDisplayTimer > 25) ? 1 : 0;
-		drawString(finalLayer, SCREEN_WIDTH / 2 - 5, JUDGE_LINE_Y - 4 - yOff, judgePad, judgeColor);
+		drawString(finalLayer, SCREEN_WIDTH / 2 - 5, currentJudgeLineY - 4 - yOff, judgePad, judgeColor);
 		judgeDisplayTimer--;
+	}
+	
+	// 【新增特效：终极闪烁 / 反色效果】作用于所有图像层
+	if (isFlash) {
+		for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+			for (int x = 0; x < SCREEN_WIDTH; ++x) {
+				WORD attr = finalLayer[y][x].Attributes;
+				// 将前景色变为背景色，实现色彩反转致盲效果
+				WORD fg = attr & 0x0F;
+				WORD bg = (attr & 0xF0) >> 4;
+				finalLayer[y][x].Attributes = (fg << 4) | bg;
+			}
+		}
 	}
 	
 	COORD bufferSize = { SCREEN_WIDTH, SCREEN_HEIGHT }; COORD bufferCoord = { 0, 0 }; SMALL_RECT writeRegion = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 };
@@ -473,89 +555,126 @@ void processInput(long long curTime) {
 	int gT = settings.beginnerMode ? 200 : 100;
 	int bT = settings.beginnerMode ? 250 : 180;
 	
-	for (int i = 0; i < 4; ++i) {
-		bool isKeyDown = (GetAsyncKeyState(KEYS[i]) & 0x8000) != 0;
-		bool isKeyPressed = isKeyDown && !prevKeyState[i];
-		
+	// 【新增】全自动打歌逻辑 (Auto Play)
+	if (settings.autoPlay) {
+		for (int i = 0; i < 4; ++i) prevKeyState[i] = false; // 清空按压状态，由程序接管
 		for (auto& note : notes) {
-			if (note.lane != i || note.processed) continue;
-			
-			long long diff = abs(curTime - note.hitTime);
+			if (note.processed) continue;
+			long long diff = note.hitTime - curTime;
 			
 			if (note.type == TAP) {
-				if (isKeyPressed) {
-					if (diff <= pT) { 
-						lastJudge = "PERFECT"; combo++; statPerfect++;
-						laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
-						hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f; 
-						spawnParticles(i, laneColors[i], 8);
-						playTapSound();
-					}
-					else if (diff <= gT) { 
-						lastJudge = "GREAT"; combo++; statGreat++;
-						laneColors[i] = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
-						spawnParticles(i, laneColors[i], 4);
-						playTapSound();
-					}
-					else if (diff <= bT) { 
-						lastJudge = "BAD"; combo = 0; statBad++;
-						laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN; 
-						playTapSound();
-					}
-					else continue;
-					
-					note.processed = true; maxCombo = std::max(maxCombo, combo);
-					judgeDisplayTimer = 30; lastHitTime = curTime; laneEffectEndTime[i] = curTime + 100;
-					break;
+				if (diff <= 0) { // 精准到达时刻完美击杀
+					lastJudge = "PERFECT"; combo++; statPerfect++; maxCombo = std::max(maxCombo, combo);
+					judgeDisplayTimer = 30; lastHitTime = curTime;
+					laneColors[note.lane] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[note.lane] = curTime + 100;
+					hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f;
+					spawnParticles(note.lane, laneColors[note.lane], 8); playTapSound();
+					note.processed = true;
 				}
-			}
-			else if (note.type == HOLD) {
+			} else if (note.type == HOLD) {
 				if (!note.isBeingHeld) {
-					if (isKeyDown && diff <= gT) { 
+					if (diff <= 0) { // 自动精准接住
 						note.isBeingHeld = true;
-						if (diff <= pT) { 
-							lastJudge = "PERFECT"; laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
-							hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f;
-						}
-						judgeDisplayTimer = 10; spawnParticles(i, laneColors[i], 5);
-						playTapSound();
-						break; 
+						lastJudge = "PERFECT"; judgeDisplayTimer = 10;
+						laneColors[note.lane] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f;
+						spawnParticles(note.lane, laneColors[note.lane], 5); playTapSound();
 					}
-				}
-				else { 
-					laneEffectEndTime[i] = curTime + 100;
-					long long endTime = note.hitTime + note.duration;
-					
-					if (curTime % 3 == 0) spawnParticles(i, FOREGROUND_GREEN | FOREGROUND_INTENSITY, 1, 0.5f);
-					
-					if (!isKeyDown) { 
-						if (curTime >= endTime - pT) { 
-							note.isBeingHeld = false; note.processed = true;
-							lastJudge = "PERFECT"; combo++; statPerfect++; judgeDisplayTimer = 30; lastHitTime = curTime;
-							laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-							spawnParticles(i, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, 10);
-							break;
-						}
-						else {
-							note.isBeingHeld = false; note.processed = true;
-							lastJudge = "MISS"; combo = 0; statMiss++; judgeDisplayTimer = 30;
-							laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-							break;
-						}
-					}
-					else if (curTime >= note.hitTime + note.duration) { 
+				} else {
+					prevKeyState[note.lane] = true; // 自动模拟持续按压
+					laneEffectEndTime[note.lane] = curTime + 100;
+					if (curTime % 3 == 0) spawnParticles(note.lane, FOREGROUND_GREEN | FOREGROUND_INTENSITY, 1, 0.5f);
+					if (curTime >= note.hitTime + note.duration) { // 完美松手
 						note.isBeingHeld = false; note.processed = true;
 						lastJudge = "PERFECT"; combo++; statPerfect++; maxCombo = std::max(maxCombo, combo);
 						judgeDisplayTimer = 30; lastHitTime = curTime;
-						laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-						hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.4f; spawnParticles(i, laneColors[i], 12);
-						break;
+						laneColors[note.lane] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[note.lane] = curTime + 100;
+						hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.4f; spawnParticles(note.lane, laneColors[note.lane], 12);
 					}
-					break; 
 				}
 			}
 		}
-		prevKeyState[i] = isKeyDown;
+	} else {
+		// 原有普通手打输入逻辑
+		for (int i = 0; i < 4; ++i) {
+			bool isKeyDown = (GetAsyncKeyState(KEYS[i]) & 0x8000) != 0;
+			bool isKeyPressed = isKeyDown && !prevKeyState[i];
+			
+			for (auto& note : notes) {
+				if (note.lane != i || note.processed) continue;
+				
+				long long diff = abs(curTime - note.hitTime);
+				
+				if (note.type == TAP) {
+					if (isKeyPressed) {
+						if (diff <= pT) { 
+							lastJudge = "PERFECT"; combo++; statPerfect++;
+							laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
+							hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f; 
+							spawnParticles(i, laneColors[i], 8); playTapSound();
+						}
+						else if (diff <= gT) { 
+							lastJudge = "GREAT"; combo++; statGreat++;
+							laneColors[i] = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
+							spawnParticles(i, laneColors[i], 4); playTapSound();
+						}
+						else if (diff <= bT) { 
+							lastJudge = "BAD"; combo = 0; statBad++;
+							laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN; playTapSound();
+						}
+						else continue;
+						
+						note.processed = true; maxCombo = std::max(maxCombo, combo);
+						judgeDisplayTimer = 30; lastHitTime = curTime; laneEffectEndTime[i] = curTime + 100;
+						break;
+					}
+				}
+				else if (note.type == HOLD) {
+					if (!note.isBeingHeld) {
+						if (isKeyDown && diff <= gT) { 
+							note.isBeingHeld = true;
+							if (diff <= pT) { 
+								lastJudge = "PERFECT"; laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
+								hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f;
+							}
+							judgeDisplayTimer = 10; spawnParticles(i, laneColors[i], 5); playTapSound();
+							break; 
+						}
+					}
+					else { 
+						laneEffectEndTime[i] = curTime + 100;
+						long long endTime = note.hitTime + note.duration;
+						
+						if (curTime % 3 == 0) spawnParticles(i, FOREGROUND_GREEN | FOREGROUND_INTENSITY, 1, 0.5f);
+						
+						if (!isKeyDown) { 
+							if (curTime >= endTime - pT) { 
+								note.isBeingHeld = false; note.processed = true;
+								lastJudge = "PERFECT"; combo++; statPerfect++; judgeDisplayTimer = 30; lastHitTime = curTime;
+								laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+								spawnParticles(i, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, 10);
+								break;
+							}
+							else {
+								note.isBeingHeld = false; note.processed = true;
+								lastJudge = "MISS"; combo = 0; statMiss++; judgeDisplayTimer = 30;
+								laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+								break;
+							}
+						}
+						else if (curTime >= note.hitTime + note.duration) { 
+							note.isBeingHeld = false; note.processed = true;
+							lastJudge = "PERFECT"; combo++; statPerfect++; maxCombo = std::max(maxCombo, combo);
+							judgeDisplayTimer = 30; lastHitTime = curTime;
+							laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+							hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.4f; spawnParticles(i, laneColors[i], 12);
+							break;
+						}
+						break; 
+					}
+				}
+			}
+			prevKeyState[i] = isKeyDown;
+		}
 	}
 }
 
@@ -614,7 +733,7 @@ void renderResults(long long uiTime) {
 		WORD rankColor = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED; std::string r1, r2, r3, r4, r5;
 		if (targetAcc >= 95.0f) { rankColor = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; r1 = "  ____  "; r2 = " / ___| "; r3 = " \\___ \\ "; r4 = "  ___) |"; r5 = " |____/ "; }
 		else if (targetAcc >= 90.0f) { rankColor = FOREGROUND_RED | FOREGROUND_INTENSITY; r1 = "    _    "; r2 = "   / \\   "; r3 = "  / _ \\  "; r4 = " / ___ \\ "; r5 = "/_/   \\_\\"; }
-		else if (targetAcc >= 80.0f) { rankColor = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY; r1 = " ____  "; r2 = "| __ ) "; r3 = "|  _ \\ "; r4 = "| |_) .0|"; r5 = "|____/ ";}
+		else if (targetAcc >= 80.0f) { rankColor = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY; r1 = " ____  "; r2 = "| __ ) "; r3 = "|  _ \\ "; r4 = "| |_) |"; r5 = "|____/ ";}
 		else if (targetAcc >= 70.0f) { rankColor = FOREGROUND_GREEN | FOREGROUND_INTENSITY; r1 = "  ____  "; r2 = " / ___| "; r3 = "| |     "; r4 = "| |___  "; r5 = " \\____| "; }
 		else { rankColor = FOREGROUND_INTENSITY; r1 = " ____   "; r2 = "|  _ \\  "; r3 = "| | | | "; r4 = "| |_| | "; r5 = "|____/  "; }
 		
@@ -694,7 +813,7 @@ void renderMenu(long long uiTime) {
 	if (elapsed > 1000) {
 		drawString(finalLayer, 22, 30, "用 [W / S] 或 [UP / DOWN] 选择", FOREGROUND_BLUE | FOREGROUND_GREEN);
 		drawString(finalLayer, 25, 31, "按下 [ENTER] 开始", FOREGROUND_BLUE | FOREGROUND_GREEN);
-		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.13", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.16", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
 	}
 	
 	COORD bufferSize = { SCREEN_WIDTH, SCREEN_HEIGHT }; COORD bufferCoord = { 0, 0 }; SMALL_RECT writeRegion = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 };
@@ -720,7 +839,7 @@ void processMenuInput() {
 	upPressed = currentUp; downPressed = currentDown; prevEnterState = currentEnter; 
 }
 
-// 【特效：下坠扫描线设置界面】
+// 【修改：下坠扫描线设置界面，支持扩容到8项设置】
 void renderSettings(long long uiTime) {
 	clearBuffer(finalLayer);
 	
@@ -741,18 +860,20 @@ void renderSettings(long long uiTime) {
 	drawString(finalLayer, 30, 5, "=== 游戏设置 ===", titleColor);
 	drawString(finalLayer, 15, 8, "用 [W/S] 选择, [A/D] 调整, [ESC/ENTER] 保存并返回", FOREGROUND_BLUE | FOREGROUND_GREEN);
 	
-	std::string itemTexts[6];
+	std::string itemTexts[8];
 	itemTexts[0] = std::string("星空背景特效 : ") + (settings.enableStarfield ? "开 (ON)" : "关 (OFF)");
 	itemTexts[1] = std::string("打击粒子特效 : ") + (settings.enableKeyEffects ? "开 (ON)" : "关 (OFF)");
 	itemTexts[2] = "隐形(上隐)参数 : " + std::to_string(settings.hiddenLevel) + " 行 (0~34)";
 	itemTexts[3] = "音乐延迟补偿 : " + std::string(settings.audioOffset > 0 ? "+" : "") + std::to_string(settings.audioOffset) + " ms";
 	itemTexts[4] = std::string("休闲新手模式 : ") + (settings.beginnerMode ? "开 (ON)" : "关 (OFF)");
 	itemTexts[5] = std::string("打击音效开关 : ") + (settings.enableTapSound ? "开 (ON)" : "关 (OFF)");
+	// 【新增设置项显示】
+	itemTexts[6] = std::string("实时准确率(ACC): ") + (settings.showRealTimeAcc ? "开 (ON)" : "关 (OFF)");
+	itemTexts[7] = std::string("全自动打歌模式 : ") + (settings.autoPlay ? "开 (ON)" : "关 (OFF)");
 	
-	for (int i = 0; i < 6; ++i) {
+	for (int i = 0; i < 8; ++i) {
 		int x = 25, y = 14 + i * 2;
 		if (i == selectedSettingItem) {
-			// 闪烁括号选中效果
 			int pulse = (uiTime / 150) % 2;
 			std::string brkLeft = pulse ? "[ " : "  ";
 			std::string brkRight = pulse ? " ]" : "  ";
@@ -774,8 +895,9 @@ void processSettingsInput() {
 	bool currentRight = (GetAsyncKeyState(VK_RIGHT) & 0x8000) || (GetAsyncKeyState('D') & 0x8000);
 	bool currentExit = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) || (GetAsyncKeyState(VK_RETURN) & 0x8000);
 	
-	if (currentUp && !upPressed) selectedSettingItem = (selectedSettingItem - 1 + 6) % 6;
-	if (currentDown && !downPressed) selectedSettingItem = (selectedSettingItem + 1) % 6;
+	// 修改菜单项遍历模数为8
+	if (currentUp && !upPressed) selectedSettingItem = (selectedSettingItem - 1 + 8) % 8;
+	if (currentDown && !downPressed) selectedSettingItem = (selectedSettingItem + 1) % 8;
 	
 	if (currentLeft && !leftPressed) {
 		if (selectedSettingItem == 0) settings.enableStarfield = !settings.enableStarfield;
@@ -784,6 +906,8 @@ void processSettingsInput() {
 		if (selectedSettingItem == 3) settings.audioOffset = std::max(-300, settings.audioOffset - 10);
 		if (selectedSettingItem == 4) settings.beginnerMode = !settings.beginnerMode;
 		if (selectedSettingItem == 5) settings.enableTapSound = !settings.enableTapSound;
+		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; // 新增控制
+		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               // 新增控制
 	}
 	if (currentRight && !rightPressed) {
 		if (selectedSettingItem == 0) settings.enableStarfield = !settings.enableStarfield;
@@ -792,6 +916,8 @@ void processSettingsInput() {
 		if (selectedSettingItem == 3) settings.audioOffset = std::min(300, settings.audioOffset + 10);
 		if (selectedSettingItem == 4) settings.beginnerMode = !settings.beginnerMode;
 		if (selectedSettingItem == 5) settings.enableTapSound = !settings.enableTapSound;
+		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; // 新增控制
+		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               // 新增控制
 	}
 	
 	if (currentExit && !prevEnterState) {
@@ -930,57 +1056,118 @@ void processRecording() {
 
 int main() {
 	srand((unsigned int)time(NULL)); 
+	
 	SetConsoleTitleA("Fall4K");
 	// 自动创建必需的目录防止崩溃
 	CreateDirectoryA("music", NULL);
 	CreateDirectoryA("sound", NULL);
 	CreateDirectoryA("chart", NULL);
 	
+	
 	loadSettings(); 
 	
+	
+	
 	if (!initAudioSystem()) { std::cout << "Warning: Failed to load winmm.dll." << std::endl; std::this_thread::sleep_for(std::chrono::seconds(2)); }
+	
 	
 	hConsole = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
 	SetConsoleActiveScreenBuffer(hConsole);
 	
+	
 	CONSOLE_CURSOR_INFO cursorInfo; GetConsoleCursorInfo(hConsole, &cursorInfo); cursorInfo.bVisible = FALSE; SetConsoleCursorInfo(hConsole, &cursorInfo);
 	SMALL_RECT windowSize = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 }; SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
 	
-	// 【新增】超酷开场加载动画，按回车可跳过
+	
+	// 【特效】超酷开场加载动画，按回车可跳过
 	playBootAnimation();
 	globalStateEnterTime = GetTickCount64();
 	
+	
 	while (currentState != STATE_EXIT) {
+		// 【优化】记录帧开始时间，用于精准帧率平滑控制
+		auto frame_start = std::chrono::steady_clock::now();
+		
 		long long uiTime = GetTickCount64(); // 给动画传入实时帧计数
 		
-		if (currentState == STATE_MENU) { processMenuInput(); renderMenu(uiTime); std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
-		else if (currentState == STATE_SETTINGS) { processSettingsInput(); renderSettings(uiTime); std::this_thread::sleep_for(std::chrono::milliseconds(20)); } 
-		else if (currentState == STATE_SELECT_CHART) { processChartSelectInput(); renderChartSelect(); std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
+		int targetSleep = 0; // 动态目标休眠时间
+		
+		
+		// 原本分散在各处的固定 sleep 均被移到了循环末尾统一做动态平滑控制
+		if (currentState == STATE_MENU) { processMenuInput(); renderMenu(uiTime); targetSleep = 20; }
+		else if (currentState == STATE_SETTINGS) { processSettingsInput(); renderSettings(uiTime); targetSleep = 20; } 
+		else if (currentState == STATE_SELECT_CHART) { processChartSelectInput(); renderChartSelect(); targetSleep = 20; }
 		else if (currentState == STATE_REC_SETUP) { setupRecorder(); }
 		else if (currentState == STATE_RECORDING) { processRecording(); }
-		else if (currentState == STATE_RESULTS) { processResultsInput(); renderResults(uiTime); std::this_thread::sleep_for(std::chrono::milliseconds(20)); }
+		else if (currentState == STATE_RESULTS) { processResultsInput(); renderResults(uiTime); targetSleep = 20; }
 		else if (currentState == STATE_PLAYING) {
+			targetSleep = 16; // 游戏内保持 60 FPS (16ms)
 			long long curTime = getCurrentTimeMs(); 
+			
 			if (curTime > chartTotalDuration + 2000) {
 				sendAudioCommand("stop bgm"); sendAudioCommand("close bgm");
 				currentState = STATE_RESULTS; prevEnterState = true; 
+				
 				globalStateEnterTime = GetTickCount64(); // 确保结算界面动画重置
 			}
 			
-			bool isBoom = false; float boomIntensity = 0.0f;
+			
+			// 【新增逻辑】实时计算异象动态轨道偏移与特效状态
+			float gOffX = 0.0f, gOffY = 0.0f;
+			bool isBoom = false, isRain = false, isFlash = false;
+			float boomIntensity = 0.0f;
+			
+			
 			for (const auto& a : anomalies) {
+				// X 和 Y 移动逻辑 (通过平滑插值实现丝滑偏移)
+				if (curTime >= a.startTime) {
+					if (a.type == X_SHIFT) {
+						if (curTime >= a.endTime) gOffX += a.val;
+						else gOffX += a.val * ((float)(curTime - a.startTime) / (a.endTime - a.startTime));
+					} else if (a.type == Y_SHIFT) {
+						if (curTime >= a.endTime) gOffY += a.val;
+						else gOffY += a.val * ((float)(curTime - a.startTime) / (a.endTime - a.startTime));
+					}
+				}
+				// 视觉覆盖效果逻辑 (boom, rain, flash)
 				if (curTime >= a.startTime && curTime <= a.endTime) {
-					isBoom = true; boomIntensity = 1.0f - (float)(a.endTime - curTime) / (a.endTime - a.startTime); break;
+					if (a.type == BOOM) {
+						isBoom = true; 
+						
+						boomIntensity = 1.0f - (float)(a.endTime - curTime) / (a.endTime - a.startTime);
+					} else if (a.type == RAIN) {
+						isRain = true;
+					} else if (a.type == FLASH) {
+						isFlash = true;
+					}
 				}
 			}
 			
-			if (currentState == STATE_PLAYING) { processInput(curTime); renderGame(curTime, isBoom, boomIntensity); }
-			std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			
+			// 将计算出的异象偏移实时覆盖到全局绘制基准点
+			currentLaneStartX = BASE_LANE_START_X + (int)gOffX;
+			currentJudgeLineY = BASE_JUDGE_LINE_Y + (int)gOffY;
+			
+			
+			if (currentState == STATE_PLAYING) { 
+				processInput(curTime); 
+				renderGame(curTime, isBoom, boomIntensity, isRain, isFlash); 
+			}
+			
 			
 			if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
 				sendAudioCommand("stop bgm"); sendAudioCommand("close bgm");
 				currentState = STATE_MENU; globalStateEnterTime = GetTickCount64();
 				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			}
+		}
+		
+		// 【优化】精准帧平滑，减去当前帧的实际耗时，去除微小卡顿
+		if (targetSleep > 0) {
+			auto frame_end = std::chrono::steady_clock::now();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start).count();
+			if (elapsed < targetSleep) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(targetSleep - elapsed));
 			}
 		}
 	}
