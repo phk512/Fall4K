@@ -34,9 +34,11 @@ struct Note {
 	long long duration;
 	bool processed = false;
 	bool isBeingHeld = false;
+	bool holdStarted = false;      // 【新增】标记长条是否已被初始击中
+	long long holdReleaseTime = 0; // 【新增】标记长条断开的时间点，用于宽容度判断
 };
 
-// 【修改】全面升级异象结构体，支持多种类型
+// 全面升级异象结构体，支持多种类型
 enum AnomalyType { BOOM, X_SHIFT, Y_SHIFT, RAIN, FLASH };
 struct Anomaly {
 	AnomalyType type;
@@ -60,7 +62,7 @@ struct Particle {
 	WORD color;
 };
 
-// 【新增】设置项数据结构
+// 设置项数据结构
 struct GameSettings {
 	bool enableStarfield = true;
 	bool enableKeyEffects = true;
@@ -84,8 +86,11 @@ bool initAudioSystem() {
 	dynMciSendStringA = (PFN_mciSendStringA)GetProcAddress(hWinmm, "mciSendStringA");
 	
 	if (dynMciSendStringA) {
-		// 预加载打击音效，放置在 sound 文件夹中
-		dynMciSendStringA("open \"sound/tap.mp3\" type mpegvideo alias hit_sound", NULL, 0, NULL);
+		// 【修复】预加载打击音效池，开启 10 个独立通道，完美解决快速按键吞音和无法重叠播放的问题
+		for (int i = 0; i < 10; ++i) {
+			std::string cmd = "open \"sound/tap.mp3\" type mpegvideo alias hit_sound" + std::to_string(i);
+			dynMciSendStringA(cmd.c_str(), NULL, 0, NULL);
+		}
 	}
 	
 	return dynMciSendStringA != nullptr;
@@ -93,10 +98,14 @@ bool initAudioSystem() {
 
 void playTapSound() {
 	if (dynMciSendStringA && settings.enableTapSound) {
-		// "from 0" 很重要，确保每次点击都从头开始播放，覆盖之前的声音
-		dynMciSendStringA("play hit_sound from 0", NULL, 0, NULL);
+		// 【修复】利用静态索引轮流调用 10 个音效通道，实现真正的音效叠加
+		static int poolIndex = 0;
+		std::string cmd = "play hit_sound" + std::to_string(poolIndex) + " from 0";
+		dynMciSendStringA(cmd.c_str(), NULL, 0, NULL);
+		poolIndex = (poolIndex + 1) % 10;
 	}
 }
+
 void sendAudioCommand(const std::string& cmd) {
 	if (dynMciSendStringA) {
 		dynMciSendStringA(cmd.c_str(), NULL, 0, NULL);
@@ -241,7 +250,7 @@ void loadChart(const std::string& filename) {
 		std::stringstream ss(line);
 		std::string timeStr, typeStr; ss >> timeStr >> typeStr;
 		
-		// 【修改】解析新增的异象
+		// 解析新增的异象
 		if (typeStr == "boom" || typeStr == "rain" || typeStr == "flash") {
 			Anomaly a; 
 			if (typeStr == "boom") a.type = BOOM;
@@ -256,9 +265,12 @@ void loadChart(const std::string& filename) {
 			Anomaly a;
 			a.type = (typeStr == "x") ? X_SHIFT : Y_SHIFT;
 			a.startTime = parseTime(timeStr);
+			
+			// 【修复点】：动画时长是纯数字毫秒（如 3000），不能用 parseTime 解析
 			long long duration;
 			ss >> a.val >> duration;
 			a.endTime = a.startTime + duration;
+			
 			anomalies.push_back(a);
 		} else if (typeStr == "text") {
 			Toast t; t.startTime = parseTime(timeStr);
@@ -345,7 +357,7 @@ void playBootAnimation() {
 	}
 }
 
-// 【修改】添加各种新特效参数支持
+// 添加各种新特效参数支持
 void renderGame(long long curTime, bool isBoom, float boomIntensity, bool isRain, bool isFlash) {
 	clearBuffer(playfieldLayer);
 	clearBuffer(finalLayer);
@@ -553,7 +565,7 @@ void renderGame(long long curTime, bool isBoom, float boomIntensity, bool isRain
 void processInput(long long curTime) {
 	int pT = settings.beginnerMode ? 100 : 50;
 	int gT = settings.beginnerMode ? 200 : 100;
-	int bT = settings.beginnerMode ? 250 : 180;
+	int bT = settings.beginnerMode ? 230 : 180;
 	
 	// 【新增】全自动打歌逻辑 (Auto Play)
 	if (settings.autoPlay) {
@@ -572,8 +584,9 @@ void processInput(long long curTime) {
 					note.processed = true;
 				}
 			} else if (note.type == HOLD) {
-				if (!note.isBeingHeld) {
+				if (!note.holdStarted) {
 					if (diff <= 0) { // 自动精准接住
+						note.holdStarted = true;
 						note.isBeingHeld = true;
 						lastJudge = "PERFECT"; judgeDisplayTimer = 10;
 						laneColors[note.lane] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.3f;
@@ -629,8 +642,14 @@ void processInput(long long curTime) {
 					}
 				}
 				else if (note.type == HOLD) {
-					if (!note.isBeingHeld) {
+					// 【修复】HOLD 宽容度保护
+					long long graceLimit = settings.beginnerMode ? 130 : 80;
+					long long endTime = note.hitTime + note.duration;
+					
+					if (!note.holdStarted) {
+						// 长按尚未被接住时
 						if (isKeyDown && diff <= gT) { 
+							note.holdStarted = true;
 							note.isBeingHeld = true;
 							if (diff <= pT) { 
 								lastJudge = "PERFECT"; laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; 
@@ -641,35 +660,63 @@ void processInput(long long curTime) {
 						}
 					}
 					else { 
+						// 长按已被接住过，目前处于判断维持或断开的逻辑
 						laneEffectEndTime[i] = curTime + 100;
-						long long endTime = note.hitTime + note.duration;
+						if (note.isBeingHeld && curTime % 3 == 0) spawnParticles(i, FOREGROUND_GREEN | FOREGROUND_INTENSITY, 1, 0.5f);
 						
-						if (curTime % 3 == 0) spawnParticles(i, FOREGROUND_GREEN | FOREGROUND_INTENSITY, 1, 0.5f);
-						
-						if (!isKeyDown) { 
-							if (curTime >= endTime - pT) { 
+						if (isKeyDown) { 
+							if (!note.isBeingHeld) {
+								// 如果它之前被断开，但在宽容度时间内又按回去了，则恢复
+								if (curTime - note.holdReleaseTime <= graceLimit) {
+									note.isBeingHeld = true; 
+								}
+							}
+							
+							// 如果一直按到了结束
+							if (note.isBeingHeld && curTime >= endTime) { 
 								note.isBeingHeld = false; note.processed = true;
-								lastJudge = "PERFECT"; combo++; statPerfect++; judgeDisplayTimer = 30; lastHitTime = curTime;
-								laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-								spawnParticles(i, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, 10);
+								lastJudge = "PERFECT"; combo++; statPerfect++; maxCombo = std::max(maxCombo, combo);
+								judgeDisplayTimer = 30; lastHitTime = curTime;
+								laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+								hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.4f; spawnParticles(i, laneColors[i], 12);
 								break;
 							}
-							else {
-								note.isBeingHeld = false; note.processed = true;
-								lastJudge = "MISS"; combo = 0; statMiss++; judgeDisplayTimer = 30;
-								laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-								break;
-							}
+							break; 
 						}
-						else if (curTime >= note.hitTime + note.duration) { 
-							note.isBeingHeld = false; note.processed = true;
-							lastJudge = "PERFECT"; combo++; statPerfect++; maxCombo = std::max(maxCombo, combo);
-							judgeDisplayTimer = 30; lastHitTime = curTime;
-							laneColors[i] = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
-							hitShakeEndTime = curTime + 80; hitShakeIntensity = 0.4f; spawnParticles(i, laneColors[i], 12);
+						else { 
+							// 手指松开了
+							if (note.isBeingHeld) {
+								if (curTime >= endTime - pT) { 
+									// 在接近结束时松手算完美
+									note.isBeingHeld = false; note.processed = true;
+									lastJudge = "PERFECT"; combo++; statPerfect++; judgeDisplayTimer = 30; lastHitTime = curTime;
+									laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+									spawnParticles(i, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, 10);
+									break;
+								}
+								else {
+									// 中途松开，进入断连宽容度
+									note.isBeingHeld = false;
+									note.holdReleaseTime = curTime; // 记录断开时间
+								}
+							} else {
+								// 已经松开，检查是否超时没按回来
+								if (curTime - note.holdReleaseTime > graceLimit) {
+									note.processed = true;
+									lastJudge = "MISS"; combo = 0; statMiss++; judgeDisplayTimer = 30;
+									laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+									break;
+								} else if (curTime >= endTime - pT) {
+									// 如果宽容度期间它刚好到达了结束判定点，则直接给 Perfect
+									note.processed = true;
+									lastJudge = "PERFECT"; combo++; statPerfect++; judgeDisplayTimer = 30; lastHitTime = curTime;
+									laneColors[i] = FOREGROUND_INTENSITY; laneEffectEndTime[i] = curTime + 100;
+									spawnParticles(i, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, 10);
+									break;
+								}
+							}
 							break;
 						}
-						break; 
 					}
 				}
 			}
@@ -813,7 +860,7 @@ void renderMenu(long long uiTime) {
 	if (elapsed > 1000) {
 		drawString(finalLayer, 22, 30, "用 [W / S] 或 [UP / DOWN] 选择", FOREGROUND_BLUE | FOREGROUND_GREEN);
 		drawString(finalLayer, 25, 31, "按下 [ENTER] 开始", FOREGROUND_BLUE | FOREGROUND_GREEN);
-		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.16", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.18", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
 	}
 	
 	COORD bufferSize = { SCREEN_WIDTH, SCREEN_HEIGHT }; COORD bufferCoord = { 0, 0 }; SMALL_RECT writeRegion = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 };
@@ -867,7 +914,6 @@ void renderSettings(long long uiTime) {
 	itemTexts[3] = "音乐延迟补偿 : " + std::string(settings.audioOffset > 0 ? "+" : "") + std::to_string(settings.audioOffset) + " ms";
 	itemTexts[4] = std::string("休闲新手模式 : ") + (settings.beginnerMode ? "开 (ON)" : "关 (OFF)");
 	itemTexts[5] = std::string("打击音效开关 : ") + (settings.enableTapSound ? "开 (ON)" : "关 (OFF)");
-	// 【新增设置项显示】
 	itemTexts[6] = std::string("实时准确率(ACC): ") + (settings.showRealTimeAcc ? "开 (ON)" : "关 (OFF)");
 	itemTexts[7] = std::string("全自动打歌模式 : ") + (settings.autoPlay ? "开 (ON)" : "关 (OFF)");
 	
@@ -906,8 +952,8 @@ void processSettingsInput() {
 		if (selectedSettingItem == 3) settings.audioOffset = std::max(-300, settings.audioOffset - 10);
 		if (selectedSettingItem == 4) settings.beginnerMode = !settings.beginnerMode;
 		if (selectedSettingItem == 5) settings.enableTapSound = !settings.enableTapSound;
-		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; // 新增控制
-		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               // 新增控制
+		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; 
+		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               
 	}
 	if (currentRight && !rightPressed) {
 		if (selectedSettingItem == 0) settings.enableStarfield = !settings.enableStarfield;
@@ -916,8 +962,8 @@ void processSettingsInput() {
 		if (selectedSettingItem == 3) settings.audioOffset = std::min(300, settings.audioOffset + 10);
 		if (selectedSettingItem == 4) settings.beginnerMode = !settings.beginnerMode;
 		if (selectedSettingItem == 5) settings.enableTapSound = !settings.enableTapSound;
-		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; // 新增控制
-		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               // 新增控制
+		if (selectedSettingItem == 6) settings.showRealTimeAcc = !settings.showRealTimeAcc; 
+		if (selectedSettingItem == 7) settings.autoPlay = !settings.autoPlay;               
 	}
 	
 	if (currentExit && !prevEnterState) {
@@ -1063,26 +1109,19 @@ int main() {
 	CreateDirectoryA("sound", NULL);
 	CreateDirectoryA("chart", NULL);
 	
-	
 	loadSettings(); 
 	
-	
-	
 	if (!initAudioSystem()) { std::cout << "Warning: Failed to load winmm.dll." << std::endl; std::this_thread::sleep_for(std::chrono::seconds(2)); }
-	
 	
 	hConsole = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
 	SetConsoleActiveScreenBuffer(hConsole);
 	
-	
 	CONSOLE_CURSOR_INFO cursorInfo; GetConsoleCursorInfo(hConsole, &cursorInfo); cursorInfo.bVisible = FALSE; SetConsoleCursorInfo(hConsole, &cursorInfo);
 	SMALL_RECT windowSize = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 }; SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
-	
 	
 	// 【特效】超酷开场加载动画，按回车可跳过
 	playBootAnimation();
 	globalStateEnterTime = GetTickCount64();
-	
 	
 	while (currentState != STATE_EXIT) {
 		// 【优化】记录帧开始时间，用于精准帧率平滑控制
@@ -1091,7 +1130,6 @@ int main() {
 		long long uiTime = GetTickCount64(); // 给动画传入实时帧计数
 		
 		int targetSleep = 0; // 动态目标休眠时间
-		
 		
 		// 原本分散在各处的固定 sleep 均被移到了循环末尾统一做动态平滑控制
 		if (currentState == STATE_MENU) { processMenuInput(); renderMenu(uiTime); targetSleep = 20; }
@@ -1111,12 +1149,10 @@ int main() {
 				globalStateEnterTime = GetTickCount64(); // 确保结算界面动画重置
 			}
 			
-			
 			// 【新增逻辑】实时计算异象动态轨道偏移与特效状态
 			float gOffX = 0.0f, gOffY = 0.0f;
 			bool isBoom = false, isRain = false, isFlash = false;
 			float boomIntensity = 0.0f;
-			
 			
 			for (const auto& a : anomalies) {
 				// X 和 Y 移动逻辑 (通过平滑插值实现丝滑偏移)
@@ -1143,17 +1179,14 @@ int main() {
 				}
 			}
 			
-			
 			// 将计算出的异象偏移实时覆盖到全局绘制基准点
 			currentLaneStartX = BASE_LANE_START_X + (int)gOffX;
 			currentJudgeLineY = BASE_JUDGE_LINE_Y + (int)gOffY;
-			
 			
 			if (currentState == STATE_PLAYING) { 
 				processInput(curTime); 
 				renderGame(curTime, isBoom, boomIntensity, isRain, isFlash); 
 			}
-			
 			
 			if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
 				sendAudioCommand("stop bgm"); sendAudioCommand("close bgm");
