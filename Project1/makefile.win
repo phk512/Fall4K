@@ -6,11 +6,11 @@ CC       = "gcc.exe"
 WINDRES  = "windres.exe"
 RM       = del /q /f
 CD       = cd /d
-LIBS     = "-Wl,--stack,12582912"
+LIBS     = "-Wl,--stack,12582912" "-s" "-static"
 INCS     = 
 CXXINCS  = 
-CXXFLAGS = $(CXXINCS) "-g3" "-pipe" "-Wall" "-D_DEBUG"
-CFLAGS   = $(INCS) "-g3" "-pipe" "-Wall" "-D_DEBUG"
+CXXFLAGS = $(CXXINCS) "-Ofast" "-pipe"
+CFLAGS   = $(INCS) "-Ofast" "-pipe"
 WINDRESFLAGS = 
 RES      = Project1_private.res
 OBJ      = ../music.o $(RES)
@@ -30,7 +30,7 @@ Project1.exe: $(OBJ)
 	$(CXX) $(LINKOBJ) -o "Project1.exe" $(LIBS)
 
 ../music.o: ../music.cpp
-	$(CXX) -c "../music.cpp" -o "../music.o" $(CXXFLAGS)  -finput-charset=UTF-8 -fexec-charset=gbk
+	$(CXX) -c "../music.cpp" -o "../music.o" $(CXXFLAGS)  -finput-charset=UTF-8 -fexec-charset=gb18030
 
 Project1_private.res: Project1_private.rc ../resource.rc 
 	$(WINDRES) -i "Project1_private.rc" --input-format=rc -o "Project1_private.res" -O coff $(WINDRESFLAGS) 

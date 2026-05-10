@@ -1,20 +1,22 @@
 [
     {
-        "caretX": 2,
-        "caretY": 735,
-        "filename": "G:/Users/14023/Documents/c++/Avantgarde/1/0.13/music.cpp",
-        "focused": false,
-        "isOpen": false,
+        "caretX": 42,
+        "caretY": 862,
+        "filename": "G:/Users/14023/Documents/c++/Avantgarde/1/0.20/music.cpp",
+        "focused": true,
+        "isOpen": true,
         "left": 0,
-        "top": 16514
+        "order": 0,
+        "top": 19481
     },
     {
-        "caretX": 44,
+        "caretX": 45,
         "caretY": 25,
-        "filename": "G:/Users/14023/Documents/c++/Avantgarde/1/0.13/resource.rc",
+        "filename": "G:/Users/14023/Documents/c++/Avantgarde/1/0.20/resource.rc",
         "focused": false,
-        "isOpen": false,
+        "isOpen": true,
         "left": 0,
+        "order": 1,
         "top": 0
     }
 ]
