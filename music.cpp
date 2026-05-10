@@ -860,7 +860,7 @@ void renderMenu(long long uiTime) {
 	if (elapsed > 1000) {
 		drawString(finalLayer, 22, 30, "用 [W / S] 或 [UP / DOWN] 选择", FOREGROUND_BLUE | FOREGROUND_GREEN);
 		drawString(finalLayer, 25, 31, "按下 [ENTER] 开始", FOREGROUND_BLUE | FOREGROUND_GREEN);
-		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.18", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+		drawString(finalLayer, 27, 35, "(C) 2026 Demo 0.20", FOREGROUND_BLUE | FOREGROUND_INTENSITY);
 	}
 	
 	COORD bufferSize = { SCREEN_WIDTH, SCREEN_HEIGHT }; COORD bufferCoord = { 0, 0 }; SMALL_RECT writeRegion = { 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1 };
