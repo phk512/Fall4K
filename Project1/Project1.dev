@@ -64,11 +64,11 @@ SyncProduct = 1
 
 
 [Unit1]
-FileName = ../music.cpp
+FileName = ../resource.rc
 CompileCpp = 1
-Folder = 源文件
+Folder = Resources
 Compile = 1
-Link = 1
+Link = 0
 Priority = 1000
 OverrideBuildCmd = 0
 BuildCmd = 
@@ -77,10 +77,10 @@ RealEncoding = UTF-8
 
 
 [Unit2]
-FileName = ../resource.rc
-Folder = Resources
+FileName = ../music.cpp
+Folder = 源文件
 Compile = 1
-Link = 0
+Link = 1
 Priority = 1000
 OverrideBuildCmd = 0
 BuildCmd = 
@@ -97,7 +97,7 @@ cc_cmd_opt_check_iso_conformance =
 cc_cmd_opt_debug_info = 
 cc_cmd_opt_inhibit_all_warning = 
 cc_cmd_opt_instruction = 
-cc_cmd_opt_optimize = fast
+cc_cmd_opt_optimize = 3
 cc_cmd_opt_pointer_size = 
 cc_cmd_opt_profile_info = 
 cc_cmd_opt_stack_protector = 
